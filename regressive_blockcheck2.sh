@@ -103,122 +103,204 @@ rb_configure_curl_opt()
 
 rb_exitp()
 {
-	local A
+	local continue_prompt
 	[ "$BATCH" = 1 ] || {
 		echo
 		echo press enter to continue
-		read A
+		read -r continue_prompt
 	}
 	exit "$1"
 }
 
-# Interactive prompts (aligned with blockcheck2.sh ask_params where applicable).
-ask_regressive_params()
+count_domains()
 {
-	local dom IPVS_def=4
+	echo "$1" | wc -w | trim
+}
 
-	[ "$BATCH" = 1 ] && return 0
+normalize_word_list()
+{
+	printf '%s' "$1" | xargs
+}
 
+default_domains_file_is_readable()
+{
+	[ -f "$DOMAINS_FILE_DEFAULT" ] && [ -r "$DOMAINS_FILE_DEFAULT" ]
+}
+
+load_domains_from_file()
+{
+	local domains_file=$1
+
+	[ -f "$domains_file" ] && [ -r "$domains_file" ] || return 1
+	grep -v '^[[:space:]]*#' "$domains_file" | xargs
+}
+
+compute_use_seed()
+{
+	use_seed=0
+	[ -n "$REGRESSIVE_SEED_LIST_TLS12" ] && [ -s "$REGRESSIVE_SEED_LIST_TLS12" ] && use_seed=1
+	[ -n "$REGRESSIVE_SEED_LIST_TLS13" ] && [ -s "$REGRESSIVE_SEED_LIST_TLS13" ] && use_seed=1
+	[ -n "$REGRESSIVE_SEED_LIST_QUIC" ] && [ -s "$REGRESSIVE_SEED_LIST_QUIC" ] && use_seed=1
+}
+
+validate_domain_count_or_exitp()
+{
+	local domains_count
+
+	domains_count=$(count_domains "$REGRESSIVE_DOMAINS")
+	[ "$domains_count" -gt 1 ] || {
+		echo "regressive mode needs at least 2 domains (or use plain blockcheck2.sh for one host)."
+		rb_exitp 1
+	}
+}
+
+validate_domain_count_or_exit()
+{
+	DOMAINS_COUNT_CHK=$(count_domains "$REGRESSIVE_DOMAINS")
+	[ "$DOMAINS_COUNT_CHK" -ge 2 ] || {
+		echo "regressive mode needs at least 2 domains."
+		exit 1
+	}
+}
+
+ensure_default_domains_file()
+{
+	[ -z "$REGRESSIVE_DOMAINS_FILE" ] && default_domains_file_is_readable && REGRESSIVE_DOMAINS_FILE="$DOMAINS_FILE_DEFAULT"
+}
+
+load_domains_from_configured_file_if_needed()
+{
+	[ -n "$REGRESSIVE_DOMAINS" ] && return 0
+	ensure_default_domains_file
+	[ -n "$REGRESSIVE_DOMAINS_FILE" ] || return 0
+	[ -f "$REGRESSIVE_DOMAINS_FILE" ] && [ -r "$REGRESSIVE_DOMAINS_FILE" ] || return 0
+	REGRESSIVE_DOMAINS=$(load_domains_from_file "$REGRESSIVE_DOMAINS_FILE")
+}
+
+resolve_prompted_domains()
+{
+	local domains_answer=$1
+	local domains_from_file
+
+	if [ -z "$domains_answer" ]; then
+		if default_domains_file_is_readable; then
+			REGRESSIVE_DOMAINS=$(load_domains_from_file "$DOMAINS_FILE_DEFAULT")
+		else
+			REGRESSIVE_DOMAINS=$DOMAINS_DEFAULT
+		fi
+		return 0
+	fi
+
+	if [ "${domains_answer#@}" != "$domains_answer" ] && [ -f "${domains_answer#@}" ] && [ -r "${domains_answer#@}" ]; then
+		domains_from_file=$(load_domains_from_file "${domains_answer#@}")
+		[ -n "$domains_from_file" ] || {
+			echo "no domains found in ${domains_answer#@}"
+			rb_exitp 1
+		}
+		REGRESSIVE_DOMAINS=$domains_from_file
+		return 0
+	fi
+
+	REGRESSIVE_DOMAINS=$(normalize_word_list "$domains_answer")
+	[ -z "$REGRESSIVE_DOMAINS" ] && REGRESSIVE_DOMAINS=$DOMAINS_DEFAULT
+}
+
+show_regressive_intro()
+{
 	echo
 	echo NOTE ! this test should be run with zapret or any other bypass software disabled, without VPN
 	echo
 	echo "--- regressive blockcheck ---"
 	echo "Each domain after the first is tested only with strategies that succeeded on the previous domain."
 	echo
+}
 
+ensure_interactive_prereqs()
+{
 	curl_supports_connect_to || {
 		echo "installed curl does not support --connect-to option. pls install at least curl 7.49"
 		echo "current curl version:"
 		"$CURL" --version
 		rb_exitp 1
 	}
+}
 
-	rb_configure_curl_opt
+prompt_domains_if_needed()
+{
+	local domains_answer
 
-	[ -n "$REGRESSIVE_DOMAINS" ] || {
-		if [ -z "$REGRESSIVE_DOMAINS_FILE" ] && [ -f "$DOMAINS_FILE_DEFAULT" ] && [ -r "$DOMAINS_FILE_DEFAULT" ]; then
-			REGRESSIVE_DOMAINS_FILE="$DOMAINS_FILE_DEFAULT"
-		fi
-		if [ -n "$REGRESSIVE_DOMAINS_FILE" ] && [ -f "$REGRESSIVE_DOMAINS_FILE" ] && [ -r "$REGRESSIVE_DOMAINS_FILE" ]; then
-			REGRESSIVE_DOMAINS=$(grep -v '^[[:space:]]*#' "$REGRESSIVE_DOMAINS_FILE" | xargs)
-		fi
-	}
+	load_domains_from_configured_file_if_needed
+	[ -n "$REGRESSIVE_DOMAINS" ] && return 0
 
-	[ -n "$REGRESSIVE_DOMAINS" ] || {
-		echo "specify domain(s). multiple domains are space separated. URIs are supported (rutracker.org/forum/index.php)"
-		echo "Long lists: use @/path/to/file (# comment lines ignored) or REGRESSIVE_DOMAINS_FILE — avoids TTY paste limits and broken multi-line paste."
-		if [ -f "$DOMAINS_FILE_DEFAULT" ] && [ -r "$DOMAINS_FILE_DEFAULT" ]; then
-			printf "domain(s) or @file (default: @%s) : " "$DOMAINS_FILE_DEFAULT"
-		else
-			printf "domain(s) (default: $DOMAINS_DEFAULT) : "
-		fi
-		read -r dom
-		if [ -z "$dom" ]; then
-			if [ -f "$DOMAINS_FILE_DEFAULT" ] && [ -r "$DOMAINS_FILE_DEFAULT" ]; then
-				REGRESSIVE_DOMAINS=$(grep -v '^[[:space:]]*#' "$DOMAINS_FILE_DEFAULT" | xargs)
-			else
-				REGRESSIVE_DOMAINS=$DOMAINS_DEFAULT
-			fi
-		elif [ "${dom#@}" != "$dom" ] && [ -f "${dom#@}" ] && [ -r "${dom#@}" ]; then
-			REGRESSIVE_DOMAINS=$(grep -v '^[[:space:]]*#' "${dom#@}" | xargs)
-			[ -n "$REGRESSIVE_DOMAINS" ] || {
-				echo "no domains found in ${dom#@}"
-				rb_exitp 1
-			}
-		else
-			# Collapse embedded newlines/tabs (multi-line paste) into one space-separated list
-			REGRESSIVE_DOMAINS=$(printf '%s' "$dom" | xargs)
-			[ -z "$REGRESSIVE_DOMAINS" ] && REGRESSIVE_DOMAINS=$DOMAINS_DEFAULT
-		fi
-	}
+	echo "specify domain(s). multiple domains are space separated. URIs are supported (rutracker.org/forum/index.php)"
+	echo "Long lists: use @/path/to/file (# comment lines ignored) or REGRESSIVE_DOMAINS_FILE — avoids TTY paste limits and broken multi-line paste."
+	if default_domains_file_is_readable; then
+		printf "domain(s) or @file (default: @%s) : " "$DOMAINS_FILE_DEFAULT"
+	else
+		printf "domain(s) (default: $DOMAINS_DEFAULT) : "
+	fi
+	read -r domains_answer
+	resolve_prompted_domains "$domains_answer"
+}
 
-	[ -n "$REGRESSIVE_WORKDIR" ] || {
-		printf "work directory for logs and list files (default: $WORKDIR_DEF) : "
-		read -r dom
-		REGRESSIVE_WORKDIR="${dom:-$WORKDIR_DEF}"
-	}
+prompt_workdir_if_needed()
+{
+	local workdir_answer
+
+	[ -n "$REGRESSIVE_WORKDIR" ] && return 0
+	printf "work directory for logs and list files (default: $WORKDIR_DEF) : "
+	read -r workdir_answer
+	REGRESSIVE_WORKDIR="${workdir_answer:-$WORKDIR_DEF}"
+}
+
+prompt_seed_paths_if_needed()
+{
+	local tls12_seed tls13_seed quic_seed
 
 	echo
 	echo "Optional: paths to nfqws strategy list files for the FIRST domain only."
 	echo "If any file exists and is non-empty, round 1 uses TEST=custom with those lists (no full standard scan)."
 	echo "Leave empty to run a normal first-domain profile instead."
+
 	printf "list_https_tls12 (default: empty) : "
-	read -r dom
-	[ -n "$dom" ] && REGRESSIVE_SEED_LIST_TLS12=$dom
+	read -r tls12_seed
+	[ -n "$tls12_seed" ] && REGRESSIVE_SEED_LIST_TLS12=$tls12_seed
+
 	printf "list_https_tls13 (default: empty) : "
-	read -r dom
-	[ -n "$dom" ] && REGRESSIVE_SEED_LIST_TLS13=$dom
+	read -r tls13_seed
+	[ -n "$tls13_seed" ] && REGRESSIVE_SEED_LIST_TLS13=$tls13_seed
+
 	printf "list_quic / http3 (default: empty) : "
-	read -r dom
-	[ -n "$dom" ] && REGRESSIVE_SEED_LIST_QUIC=$dom
+	read -r quic_seed
+	[ -n "$quic_seed" ] && REGRESSIVE_SEED_LIST_QUIC=$quic_seed
+}
 
-	use_seed=0
-	[ -n "$REGRESSIVE_SEED_LIST_TLS12" ] && [ -s "$REGRESSIVE_SEED_LIST_TLS12" ] && use_seed=1
-	[ -n "$REGRESSIVE_SEED_LIST_TLS13" ] && [ -s "$REGRESSIVE_SEED_LIST_TLS13" ] && use_seed=1
-	[ -n "$REGRESSIVE_SEED_LIST_QUIC" ] && [ -s "$REGRESSIVE_SEED_LIST_QUIC" ] && use_seed=1
+prompt_first_test_if_needed()
+{
+	compute_use_seed
+	[ "$use_seed" -eq 0 ] || return 0
 
-	if [ "$use_seed" -eq 0 ]; then
-		dir_is_not_empty "$BLOCKCHECK2D" || {
-			echo "directory '$BLOCKCHECK2D' is absent or empty"
-			rb_exitp 1
-		}
-		REGRESSIVE_FIRST_TEST=${REGRESSIVE_FIRST_TEST:-standard}
-		echo "first-domain profile (subdirectory of blockcheck2.d):"
-		ask_list REGRESSIVE_FIRST_TEST "standard custom" "$REGRESSIVE_FIRST_TEST"
-	fi
-
-	DOMAINS_COUNT_TMP="$(echo "$REGRESSIVE_DOMAINS" | wc -w | trim)"
-	[ "$DOMAINS_COUNT_TMP" -gt 1 ] || {
-		echo "regressive mode needs at least 2 domains (or use plain blockcheck2.sh for one host)."
+	dir_is_not_empty "$BLOCKCHECK2D" || {
+		echo "directory '$BLOCKCHECK2D' is absent or empty"
 		rb_exitp 1
 	}
+	REGRESSIVE_FIRST_TEST=${REGRESSIVE_FIRST_TEST:-standard}
+	echo "first-domain profile (subdirectory of blockcheck2.d):"
+	ask_list REGRESSIVE_FIRST_TEST "standard custom" "$REGRESSIVE_FIRST_TEST"
+}
+
+prompt_protocol_options_if_needed()
+{
+	local ipvs_answer
+	local ipvs_default=4
+	local uname_s
 
 	[ -n "$IPVS" ] || {
-		UNAME=$(uname)
-		[ "$UNAME" = Linux ] && ping -c 1 -W 1 -6 2a02:6b8::feed:0ff >/dev/null 2>&1 && IPVS_def=46
-		printf "ip protocol version(s) - 4, 6 or 46 for both (default: $IPVS_def) : "
-		read -r IPVS
-		[ -n "$IPVS" ] || IPVS=$IPVS_def
+		uname_s=$(uname)
+		[ "$uname_s" = Linux ] && ping -c 1 -W 1 -6 2a02:6b8::feed:0ff >/dev/null 2>&1 && ipvs_default=46
+		printf "ip protocol version(s) - 4, 6 or 46 for both (default: $ipvs_default) : "
+		read -r ipvs_answer
+		IPVS=${ipvs_answer:-$ipvs_default}
 		[ "$IPVS" = 4 -o "$IPVS" = 6 -o "$IPVS" = 46 ] || {
 			echo 'invalid ip version(s). should be 4, 6 or 46.'
 			rb_exitp 1
@@ -263,18 +345,24 @@ ask_regressive_params()
 			echo "installed curl version does not support http3 QUIC. tests disabled."
 		fi
 	}
+}
+
+prompt_repeat_parallel_scanlevel_if_needed()
+{
+	local repeats_answer
 
 	[ -n "$REPEATS" ] || {
 		echo
 		echo "sometimes ISPs use multiple DPIs or load balancing. bypass strategies may work unstable."
 		printf "how many times to repeat each test (default: 1) : "
-		read -r REPEATS
-		REPEATS=$((0+${REPEATS:-1}))
+		read -r repeats_answer
+		REPEATS=$((0+${repeats_answer:-1}))
 		[ "$REPEATS" = 0 ] && {
 			echo invalid repeat count
 			rb_exitp 1
 		}
 	}
+
 	[ -z "$PARALLEL" -a "$REPEATS" -gt 1 ] && {
 		PARALLEL=0
 		echo
@@ -291,7 +379,10 @@ ask_regressive_params()
 		echo force    - scan maximum despite of result
 		ask_list SCANLEVEL "quick standard force" "$SCANLEVEL"
 	}
+}
 
+show_run_mode_banner()
+{
 	echo
 	echo "--- starting runs (each inner blockcheck uses BATCH=1) ---"
 	if [ "${REGRESSIVE_SHOW_BLOCKCHECK:-1}" = 1 ]; then
@@ -301,48 +392,60 @@ ask_regressive_params()
 	fi
 }
 
-[ -f "$BLOCKCHECK" ] || {
-	echo "cannot find blockcheck2.sh at $BLOCKCHECK"
-	exit 1
+# Interactive prompts (aligned with blockcheck2.sh ask_params where applicable).
+ask_regressive_params()
+{
+	[ "$BATCH" = 1 ] && return 0
+
+	show_regressive_intro
+	ensure_interactive_prereqs
+	rb_configure_curl_opt
+	prompt_domains_if_needed
+	prompt_workdir_if_needed
+	prompt_seed_paths_if_needed
+	prompt_first_test_if_needed
+	validate_domain_count_or_exitp
+	prompt_protocol_options_if_needed
+	prompt_repeat_parallel_scanlevel_if_needed
+	show_run_mode_banner
 }
 
-REGRESSIVE_DOMAINS=${REGRESSIVE_DOMAINS:-"$*"}
-
-ask_regressive_params
-
-[ -n "$REGRESSIVE_DOMAINS" ] || {
+show_usage_and_exit()
+{
 	echo "usage: REGRESSIVE_DOMAINS='a.com b.com' $0   or: REGRESSIVE_DOMAINS_FILE=/path/to/domains $0"
 	echo "   or: $0 a.com b.com"
 	echo "non-interactive: set BATCH=1 and the same variables as for blockcheck2.sh"
 	exit 1
 }
-DOMAINS_COUNT_CHK="$(echo "$REGRESSIVE_DOMAINS" | wc -w | trim)"
-[ "$DOMAINS_COUNT_CHK" -ge 2 ] || {
-	echo "regressive mode needs at least 2 domains."
-	exit 1
+
+ensure_blockcheck_exists()
+{
+	[ -f "$BLOCKCHECK" ] || {
+		echo "cannot find blockcheck2.sh at $BLOCKCHECK"
+		exit 1
+	}
 }
 
-WORKDIR=${REGRESSIVE_WORKDIR:-"$WORKDIR_DEF"}
-FIRST_TEST=${REGRESSIVE_FIRST_TEST:-standard}
-
-use_seed=0
-[ -n "$REGRESSIVE_SEED_LIST_TLS12" ] && [ -s "$REGRESSIVE_SEED_LIST_TLS12" ] && use_seed=1
-[ -n "$REGRESSIVE_SEED_LIST_TLS13" ] && [ -s "$REGRESSIVE_SEED_LIST_TLS13" ] && use_seed=1
-[ -n "$REGRESSIVE_SEED_LIST_QUIC" ] && [ -s "$REGRESSIVE_SEED_LIST_QUIC" ] && use_seed=1
+initialize_runtime_config()
+{
+	WORKDIR=${REGRESSIVE_WORKDIR:-"$WORKDIR_DEF"}
+	FIRST_TEST=${REGRESSIVE_FIRST_TEST:-standard}
+	compute_use_seed
+}
 
 # $1 = blockcheck log, $2 = domain tested, $3 = output directory for list_https_tls12.txt etc.
 extract_summary_lists()
 {
-	_log=$1
-	_dom=$2
-	_out=$3
+	local log_file=$1
+	local domain_name=$2
+	local output_dir=$3
 
-	mkdir -p "$_out" || return 1
-	: >"$_out/list_https_tls12.txt"
-	: >"$_out/list_https_tls13.txt"
-	: >"$_out/list_quic.txt"
+	mkdir -p "$output_dir" || return 1
+	: >"$output_dir/list_https_tls12.txt"
+	: >"$output_dir/list_https_tls13.txt"
+	: >"$output_dir/list_quic.txt"
 
-	awk -v dom="$_dom" -v outbase="$_out" '
+	awk -v dom="$domain_name" -v outbase="$output_dir" '
 	$0 == "* SUMMARY" { ins = 1; next }
 	ins && $0 == "" { next }
 	ins && $1 == "*" { ins = 0; next }
@@ -385,154 +488,242 @@ extract_summary_lists()
 		print s >> (outbase "/list_quic.txt")
 		next
 	}
-	' <"$_log" || return 1
+	' <"$log_file" || return 1
 
-	for _f in list_https_tls12.txt list_https_tls13.txt list_quic.txt; do
-		[ -s "$_out/$_f" ] || : >"$_out/$_f"
-		sort -u "$_out/$_f" >"$_out/$_f.sorttmp" && mv "$_out/$_f.sorttmp" "$_out/$_f"
+	for output_file in list_https_tls12.txt list_https_tls13.txt list_quic.txt; do
+		[ -s "$output_dir/$output_file" ] || : >"$output_dir/$output_file"
+		sort -u "$output_dir/$output_file" >"$output_dir/$output_file.sorttmp" && mv "$output_dir/$output_file.sorttmp" "$output_dir/$output_file"
 	done
 }
 
 write_combined_strategy_file()
 {
-	_in=$1
-	_out=$2
-	cat "$_in/list_https_tls12.txt" "$_in/list_https_tls13.txt" "$_in/list_quic.txt" 2>/dev/null | sed '/^$/d' | sort -u >"$_out"
+	local input_dir=$1
+	local output_file=$2
+
+	cat "$input_dir/list_https_tls12.txt" "$input_dir/list_https_tls13.txt" "$input_dir/list_quic.txt" 2>/dev/null | sed '/^$/d' | sort -u >"$output_file"
+}
+
+shell_escape_strategy_line()
+{
+	printf '%s\n' "$1" | sed "s/'/'\"'\"'/g"
+}
+
+write_shell_safe_strategy_file()
+{
+	local input_file=$1
+	local output_file=$2
+
+	: >"$output_file"
+	[ -s "$input_file" ] || return 0
+	while IFS= read -r strategy_line; do
+		shell_escape_strategy_line "$strategy_line" >>"$output_file"
+	done <"$input_file"
+}
+
+write_shell_safe_list_set()
+{
+	local input_dir=$1
+	local safe_dir=$2
+
+	mkdir -p "$safe_dir" || return 1
+	write_shell_safe_strategy_file "$input_dir/list_https_tls12.txt" "$safe_dir/list_https_tls12.txt" || return 1
+	write_shell_safe_strategy_file "$input_dir/list_https_tls13.txt" "$safe_dir/list_https_tls13.txt" || return 1
+	write_shell_safe_strategy_file "$input_dir/list_quic.txt" "$safe_dir/list_quic.txt" || return 1
+}
+
+write_shell_safe_list_set_from_seeds()
+{
+	local safe_dir=$1
+
+	mkdir -p "$safe_dir" || return 1
+	write_shell_safe_strategy_file "$REGRESSIVE_SEED_LIST_TLS12" "$safe_dir/list_https_tls12.txt" || return 1
+	write_shell_safe_strategy_file "$REGRESSIVE_SEED_LIST_TLS13" "$safe_dir/list_https_tls13.txt" || return 1
+	write_shell_safe_strategy_file "$REGRESSIVE_SEED_LIST_QUIC" "$safe_dir/list_quic.txt" || return 1
+}
+
+apply_protocol_file_env()
+{
+	local file_path=$1
+	local list_var_name=$2
+	local enable_var_name=$3
+
+	if [ -n "$file_path" ] && [ -s "$file_path" ]; then
+		export "$list_var_name=$file_path"
+	else
+		unset "$list_var_name"
+		export "$enable_var_name=0"
+	fi
 }
 
 apply_custom_list_env_from_dir()
 {
-	_d=$1
-	if [ -s "$_d/list_https_tls12.txt" ]; then
-		export LIST_HTTPS_TLS12="$_d/list_https_tls12.txt"
-	else
-		unset LIST_HTTPS_TLS12
-		export ENABLE_HTTPS_TLS12=0
-	fi
-	if [ -s "$_d/list_https_tls13.txt" ]; then
-		export LIST_HTTPS_TLS13="$_d/list_https_tls13.txt"
-	else
-		unset LIST_HTTPS_TLS13
-		export ENABLE_HTTPS_TLS13=0
-	fi
-	if [ -s "$_d/list_quic.txt" ]; then
-		export LIST_QUIC="$_d/list_quic.txt"
-	else
-		unset LIST_QUIC
-		export ENABLE_HTTP3=0
-	fi
+	local list_dir=$1
+	local safe_dir="$list_dir/.shell-safe"
+
+	write_shell_safe_list_set "$list_dir" "$safe_dir" || exit 1
+	apply_protocol_file_env "$safe_dir/list_https_tls12.txt" LIST_HTTPS_TLS12 ENABLE_HTTPS_TLS12
+	apply_protocol_file_env "$safe_dir/list_https_tls13.txt" LIST_HTTPS_TLS13 ENABLE_HTTPS_TLS13
+	apply_protocol_file_env "$safe_dir/list_quic.txt" LIST_QUIC ENABLE_HTTP3
 }
 
 apply_custom_list_env_from_seeds()
 {
-	if [ -n "$REGRESSIVE_SEED_LIST_TLS12" ] && [ -s "$REGRESSIVE_SEED_LIST_TLS12" ]; then
-		export LIST_HTTPS_TLS12="$REGRESSIVE_SEED_LIST_TLS12"
-	else
-		unset LIST_HTTPS_TLS12
-		export ENABLE_HTTPS_TLS12=0
-	fi
-	if [ -n "$REGRESSIVE_SEED_LIST_TLS13" ] && [ -s "$REGRESSIVE_SEED_LIST_TLS13" ]; then
-		export LIST_HTTPS_TLS13="$REGRESSIVE_SEED_LIST_TLS13"
-	else
-		unset LIST_HTTPS_TLS13
-		export ENABLE_HTTPS_TLS13=0
-	fi
-	if [ -n "$REGRESSIVE_SEED_LIST_QUIC" ] && [ -s "$REGRESSIVE_SEED_LIST_QUIC" ]; then
-		export LIST_QUIC="$REGRESSIVE_SEED_LIST_QUIC"
-	else
-		unset LIST_QUIC
-		export ENABLE_HTTP3=0
-	fi
+	local seed_safe_dir="$WORKDIR/.seed-shell-safe"
+
+	write_shell_safe_list_set_from_seeds "$seed_safe_dir" || exit 1
+	apply_protocol_file_env "$seed_safe_dir/list_https_tls12.txt" LIST_HTTPS_TLS12 ENABLE_HTTPS_TLS12
+	apply_protocol_file_env "$seed_safe_dir/list_https_tls13.txt" LIST_HTTPS_TLS13 ENABLE_HTTPS_TLS13
+	apply_protocol_file_env "$seed_safe_dir/list_quic.txt" LIST_QUIC ENABLE_HTTP3
 }
 
-round=0
-prev_dir=""
-mkdir -p "$WORKDIR" || exit 1
+round_has_strategies()
+{
+	local list_dir=$1
+
+	[ -s "$list_dir/list_https_tls12.txt" ] || [ -s "$list_dir/list_https_tls13.txt" ] || [ -s "$list_dir/list_quic.txt" ]
+}
 
 _rb_blockcheck_to_log()
 {
-	_log=$1
+	local log_file=$1
+
 	if [ "${REGRESSIVE_SHOW_BLOCKCHECK:-1}" = 1 ]; then
-		tee "$_log"
+		tee "$log_file"
 	else
-		cat >"$_log"
+		cat >"$log_file"
 	fi
 }
 
-for dom in $REGRESSIVE_DOMAINS; do
-	round=$((round + 1))
-	dom_safe=$(printf '%s' "$dom" | tr '/:[:space:]' '___')
-	log=$(mktemp "$WORKDIR/.round-${round}-${dom_safe}.XXXXXX.log") || exit 1
-	keep_log="$WORKDIR/round-${round}-${dom_safe}.log"
-	lists_dir="$WORKDIR/lists-after-round-${round}-${dom}"
-	combined_file="$WORKDIR/strategies-after-round-${round}-${dom_safe}.txt"
-	: >"$log"
+run_blockcheck_round()
+{
+	local round_number=$1
+	local domain_name=$2
+	local previous_lists_dir=$3
+	local log_file=$4
 
-	echo "======== regressive_blockcheck2: round $round / $DOMAINS_COUNT_CHK  domain $dom ========"
-	[ "${REGRESSIVE_KEEP_LOGS:-0}" = 1 ] && echo "keeping round log: $keep_log"
-
-	if [ "$round" -eq 1 ] && [ "$use_seed" -eq 0 ]; then
+	if [ "$round_number" -eq 1 ] && [ "$use_seed" -eq 0 ]; then
 		(
 			export BATCH=1
 			unset LIST_HTTP LIST_HTTPS_TLS12 LIST_HTTPS_TLS13 LIST_QUIC
-			export DOMAINS=$dom
+			export DOMAINS=$domain_name
 			export TEST="$FIRST_TEST"
 			exec "$BLOCKCHECK"
-		) 2>&1 | _rb_blockcheck_to_log "$log" || true
-	elif [ "$round" -eq 1 ] && [ "$use_seed" -eq 1 ]; then
+		) 2>&1 | _rb_blockcheck_to_log "$log_file" || true
+		return 0
+	fi
+
+	if [ "$round_number" -eq 1 ] && [ "$use_seed" -eq 1 ]; then
 		(
 			export BATCH=1
-			export DOMAINS=$dom
+			export DOMAINS=$domain_name
 			export TEST=custom
 			apply_custom_list_env_from_seeds
 			exec "$BLOCKCHECK"
-		) 2>&1 | _rb_blockcheck_to_log "$log" || true
-	else
-		[ -n "$prev_dir" ] || {
-			echo "internal error: no previous list dir"
-			exit 1
-		}
-		[ -s "$prev_dir/list_https_tls12.txt" ] || [ -s "$prev_dir/list_https_tls13.txt" ] || [ -s "$prev_dir/list_quic.txt" ] || {
-			echo "no strategies left after previous domain; stopping before $dom"
-			exit 1
-		}
-		(
-			export BATCH=1
-			export DOMAINS=$dom
-			export TEST=custom
-			apply_custom_list_env_from_dir "$prev_dir"
-			exec "$BLOCKCHECK"
-		) 2>&1 | _rb_blockcheck_to_log "$log" || true
+		) 2>&1 | _rb_blockcheck_to_log "$log_file" || true
+		return 0
 	fi
 
-	extract_summary_lists "$log" "$dom" "$lists_dir" || {
-		echo "failed to extract lists from $log"
+	[ -n "$previous_lists_dir" ] || {
+		echo "internal error: no previous list dir"
+		exit 1
+	}
+	round_has_strategies "$previous_lists_dir" || {
+		echo "no strategies left after previous domain; stopping before $domain_name"
 		exit 1
 	}
 
-	n12=$(wc -l <"$lists_dir/list_https_tls12.txt" | tr -d ' ')
-	n13=$(wc -l <"$lists_dir/list_https_tls13.txt" | tr -d ' ')
-	nq=$(wc -l <"$lists_dir/list_quic.txt" | tr -d ' ')
+	(
+		export BATCH=1
+		export DOMAINS=$domain_name
+		export TEST=custom
+		apply_custom_list_env_from_dir "$previous_lists_dir"
+		exec "$BLOCKCHECK"
+	) 2>&1 | _rb_blockcheck_to_log "$log_file" || true
+}
+
+write_round_artifacts()
+{
+	local domain_name=$1
+	local log_file=$2
+	local lists_dir=$3
+	local combined_file=$4
+	local visible_log_file=$5
+	local tls12_count tls13_count quic_count
+
+	extract_summary_lists "$log_file" "$domain_name" "$lists_dir" || {
+		echo "failed to extract lists from $log_file"
+		exit 1
+	}
+
+	tls12_count=$(wc -l <"$lists_dir/list_https_tls12.txt" | tr -d ' ')
+	tls13_count=$(wc -l <"$lists_dir/list_https_tls13.txt" | tr -d ' ')
+	quic_count=$(wc -l <"$lists_dir/list_quic.txt" | tr -d ' ')
 	write_combined_strategy_file "$lists_dir" "$combined_file" || exit 1
-	echo "strategies for next round — tls12=$n12  tls13=$n13  quic=$nq"
+	echo "strategies for next round — tls12=$tls12_count  tls13=$tls13_count  quic=$quic_count"
 	echo "clean combined list: $combined_file"
+
 	if [ "${REGRESSIVE_KEEP_LOGS:-0}" = 1 ]; then
-		cp -f "$log" "$keep_log"
+		cp -f "$log_file" "$visible_log_file"
 	fi
-	rm -f "$log"
+	rm -f "$log_file"
+}
 
-	prev_dir=$lists_dir
-done
+finalize_artifacts()
+{
+	local final_lists_dir=$1
 
-echo "======== regressive_blockcheck2: done ========"
-echo "last-domain lists: $prev_dir"
-cp -f "$prev_dir/list_https_tls12.txt" "$WORKDIR/regressive-final-tls12.txt"
-cp -f "$prev_dir/list_https_tls13.txt" "$WORKDIR/regressive-final-tls13.txt"
-cp -f "$prev_dir/list_quic.txt" "$WORKDIR/regressive-final-quic.txt"
-write_combined_strategy_file "$prev_dir" "$WORKDIR/regressive-final-strategies.txt" || exit 1
-echo "copy-paste into zapret config (one strategy per line, nfqws args only):"
-echo "  $WORKDIR/regressive-final-tls12.txt"
-echo "  $WORKDIR/regressive-final-tls13.txt"
-echo "  $WORKDIR/regressive-final-quic.txt"
-echo "  $WORKDIR/regressive-final-strategies.txt"
-[ "${REGRESSIVE_KEEP_LOGS:-0}" = 1 ] && echo "visible round logs kept in: $WORKDIR"
+	echo "======== regressive_blockcheck2: done ========"
+	echo "last-domain lists: $final_lists_dir"
+	cp -f "$final_lists_dir/list_https_tls12.txt" "$WORKDIR/regressive-final-tls12.txt"
+	cp -f "$final_lists_dir/list_https_tls13.txt" "$WORKDIR/regressive-final-tls13.txt"
+	cp -f "$final_lists_dir/list_quic.txt" "$WORKDIR/regressive-final-quic.txt"
+	write_combined_strategy_file "$final_lists_dir" "$WORKDIR/regressive-final-strategies.txt" || exit 1
+	echo "copy-paste into zapret config (one strategy per line, nfqws args only):"
+	echo "  $WORKDIR/regressive-final-tls12.txt"
+	echo "  $WORKDIR/regressive-final-tls13.txt"
+	echo "  $WORKDIR/regressive-final-quic.txt"
+	echo "  $WORKDIR/regressive-final-strategies.txt"
+	[ "${REGRESSIVE_KEEP_LOGS:-0}" = 1 ] && echo "visible round logs kept in: $WORKDIR"
+}
+
+run_regressive_rounds()
+{
+	local round_number=0
+	local previous_lists_dir=
+	local domain_name domain_safe log_file visible_log_file lists_dir combined_file
+
+	mkdir -p "$WORKDIR" || exit 1
+
+	for domain_name in $REGRESSIVE_DOMAINS; do
+		round_number=$((round_number + 1))
+		domain_safe=$(printf '%s' "$domain_name" | tr '/:[:space:]' '___')
+		log_file=$(mktemp "$WORKDIR/.round-${round_number}-${domain_safe}.XXXXXX.log") || exit 1
+		visible_log_file="$WORKDIR/round-${round_number}-${domain_safe}.log"
+		lists_dir="$WORKDIR/lists-after-round-${round_number}-${domain_name}"
+		combined_file="$WORKDIR/strategies-after-round-${round_number}-${domain_safe}.txt"
+		: >"$log_file"
+
+		echo "======== regressive_blockcheck2: round $round_number / $DOMAINS_COUNT_CHK  domain $domain_name ========"
+		[ "${REGRESSIVE_KEEP_LOGS:-0}" = 1 ] && echo "keeping round log: $visible_log_file"
+
+		run_blockcheck_round "$round_number" "$domain_name" "$previous_lists_dir" "$log_file"
+		write_round_artifacts "$domain_name" "$log_file" "$lists_dir" "$combined_file" "$visible_log_file"
+		previous_lists_dir=$lists_dir
+	done
+
+	finalize_artifacts "$previous_lists_dir"
+}
+
+main()
+{
+	ensure_blockcheck_exists
+	REGRESSIVE_DOMAINS=${REGRESSIVE_DOMAINS:-"$*"}
+	ask_regressive_params
+	[ -n "$REGRESSIVE_DOMAINS" ] || show_usage_and_exit
+	validate_domain_count_or_exit
+	initialize_runtime_config
+	run_regressive_rounds
+}
+
+main "$@"
