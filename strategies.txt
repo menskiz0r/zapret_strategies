@@ -1,5 +1,5 @@
 
---lua-init=fake_default_tls=tls_mod(fake_default_tls,'rnd') --lua-desync=wssize:wsize=1:scale=6 --payload=tls_client_hello --lua-desync=multidisorder:pos=2:seqovl=1:seqovl_pattern=fake_default_tls
+--payload=tls_client_hello --lua-init=fake_default_tls=tls_mod(fake_default_tls,'rnd') --lua-desync=wssize:wsize=1:scale=6 --payload=tls_client_hello --lua-desync=multidisorder:pos=2:seqovl=1:seqovl_pattern=fake_default_tls
 --payload=tls_client_hello --lua-desync=fake:blob=0x00000000:ip_ttl=5:repeats=1 --lua-desync=fake:blob=fake_default_tls:ip_ttl=5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=fakeddisorder:pos=1:ip_ttl=5 --payload=empty --out-range=s1<d1 --lua-desync=pktmod:ip_ttl=1
 --payload=tls_client_hello --lua-desync=fake:blob=0x00000000:ip_ttl=5:repeats=1 --lua-desync=fake:blob=fake_default_tls:ip_ttl=5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=fakeddisorder:pos=1,midsld:ip_ttl=5 --payload=empty --out-range=s1<d1 --lua-desync=pktmod:ip_ttl=1
 --payload=tls_client_hello --lua-desync=fake:blob=0x00000000:ip_ttl=5:repeats=1 --lua-desync=fake:blob=fake_default_tls:ip_ttl=5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=fakeddisorder:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1:ip_ttl=5 --payload=empty --out-range=s1<d1 --lua-desync=pktmod:ip_ttl=1
