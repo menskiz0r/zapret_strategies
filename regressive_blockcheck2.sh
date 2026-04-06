@@ -506,7 +506,24 @@ write_combined_strategy_file()
 
 shell_escape_strategy_line()
 {
-	printf '%s\n' "$1" | sed "s/'/'\"'\"'/g"
+	local strategy_line=$1
+	local -a args
+	local arg escaped first=1
+
+	# custom/10-list.sh historically used eval, so each argument must be
+	# emitted as an individually quoted shell token to keep constructs like
+	# tls_mod(fake_default_tls,'rnd') from being reparsed as shell syntax.
+	read -r -a args <<<"$strategy_line"
+	for arg in "${args[@]}"; do
+		escaped=$(printf '%s' "$arg" | sed "s/'/'\"'\"'/g")
+		if [ "$first" -eq 1 ]; then
+			printf "'%s'" "$escaped"
+			first=0
+		else
+			printf " '%s'" "$escaped"
+		fi
+	done
+	printf '\n'
 }
 
 write_shell_safe_strategy_file()
